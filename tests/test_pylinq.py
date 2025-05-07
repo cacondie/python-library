@@ -2,7 +2,7 @@ from unittest import TestCase
 from unittest import mock
 import threading
 import time
-from src.pylinq import PyLinq
+from src.pylinq.pylinq import PyLinq
 
 
 class PyLinqTests(TestCase):

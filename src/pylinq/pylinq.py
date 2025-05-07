@@ -2,7 +2,7 @@ from collections import defaultdict
 import functools
 import itertools
 from typing import Any, Generic, Iterable, Callable, Iterator, Optional, TypeVar, cast, overload
-from src.functional_helpers import filter_concurrent, filter_map, for_each, for_each_concurrent, map_concurrent
+from .functional_helpers import filter_concurrent, filter_map, for_each, for_each_concurrent, map_concurrent
 
 
 T = TypeVar("T")  # Any Type

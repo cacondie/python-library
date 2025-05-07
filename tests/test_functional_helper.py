@@ -1,6 +1,6 @@
 from unittest import TestCase, mock
 import time
-from src.functional_helpers import (
+from src.pylinq.functional_helpers import (
     for_each,
     filter_map,
     for_each_concurrent,
