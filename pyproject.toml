@@ -1,0 +1,7 @@
+[project]
+name = "python-library"
+version = "0.1.0"
+description = "Generic Library files for use"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []

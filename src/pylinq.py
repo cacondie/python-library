@@ -2,13 +2,16 @@ from collections import defaultdict
 import functools
 import itertools
 from typing import Any, Generic, Iterable, Callable, Iterator, Optional, TypeVar, cast, overload
-from utilities.entrata_library.functional_helpers import for_each, for_each_parallel
+from src.functional_helpers import filter_concurrent, filter_map, for_each, for_each_concurrent, map_concurrent
 
 
 T = TypeVar("T")  # Any Type
 U = TypeVar("U")  # Any Other Type
 K = TypeVar("K")  # Key Type
 V = TypeVar("V")  # Value Type
+GK = TypeVar("GK")  # Group Key type - assume this is added at the top
+IK = TypeVar("IK")  # Inner Key type for sub-dictionary - assume this is added at the top
+IV = TypeVar("IV")  # Inner Value type for sub-dictionary - assume this is added at the top
 
 
 class PyLinq(Generic[T]):
@@ -168,7 +171,13 @@ class PyLinq(Generic[T]):
         return self.concat(other)
 
     def filter(self, predicate: Callable[[T], bool]) -> "PyLinq[T]":
-        return self.where(predicate)
+        return PyLinq(filter(predicate, self._items))
+
+    def filter_then_map(self, predicate: Callable[[T], bool], selector: Callable[[T], U]) -> "PyLinq[U]":
+        return PyLinq(filter_map(predicate, selector, self._items))
+
+    def filter_concurrent(self, predicate: Callable[[T], bool], max_workers: Optional[int] = None) -> "PyLinq[T]":
+        return PyLinq(filter_concurrent(predicate, self._items, max_workers))
 
     def first(self, predicate: Optional[Callable[[T], bool]] = None) -> T:
         """First element matching predicate, or first element if no predicate."""
@@ -196,8 +205,26 @@ class PyLinq(Generic[T]):
         """Perform an action on each element."""
         for_each(action, self._items)
 
-    def for_each_parallel(self, action: Callable[[T], None], max_workers: Optional[int] = None) -> None:
-        for_each_parallel(action, self._items, max_workers)
+    def for_each_expanded(self, expander: Callable[[T], Iterable[U]], action: Callable[[T, U], None]) -> None:
+        """
+        For each element in the collection, expands it into a sequence of sub-elements
+        and performs an action on each (original_element, sub_element) pair.
+
+        Args:
+            expander: A function that takes an element of type T and returns an
+                      iterable of elements of type U.
+            action: A function that takes an element of type T (original_element)
+                    and an element of type U (sub_element) and performs an action.
+        """
+        for item_t in self._items:
+            expanded_items_u = expander(item_t)
+            # Ensure expander actually returns an iterable, not None, if no sub-items
+            if expanded_items_u:
+                for item_u in expanded_items_u:
+                    action(item_t, item_u)
+
+    def for_each_concurrent(self, action: Callable[[T], None], max_workers: Optional[int] = None) -> None:
+        for_each_concurrent(action, self._items, max_workers)
 
     def index(self, item: T) -> int:
         """Return the index of the first occurrence of the item."""
@@ -278,6 +305,9 @@ class PyLinq(Generic[T]):
     def map(self, selector: Callable[[T], U]) -> "PyLinq":
         return PyLinq(map(selector, self._items))
 
+    def map_concurrent(self, selector: Callable[[T], U], max_workers: Optional[int] = None) -> "PyLinq[U]":
+        return PyLinq(map_concurrent(selector, self._items, max_workers))
+
     def max(self, selector: Optional[Callable[[T], Any]] = None) -> T:
         """Maximum element, optionally using a selector."""
         if not self._items:
@@ -325,8 +355,43 @@ class PyLinq(Generic[T]):
     def select(self, selector: Callable[[T], U]) -> "PyLinq[U]":
         return self.map(selector)
 
-    def select_many(self, selector: Callable[[T], Iterable[U]]) -> 'PyLinq[U]':
-        return PyLinq(itertools.chain.from_iterable(selector(item) for item in self._items))
+    @overload
+    def select_many(self, collection_selector: Callable[[T], Iterable[U]]) -> "PyLinq[U]": ...
+
+    @overload
+    def select_many(self, collection_selector: Callable[[T], Iterable[U]], result_selector: Callable[[T, U], V]) -> "PyLinq[V]": ...
+
+    def select_many(self, collection_selector: Callable[[T], Iterable[Any]], result_selector: Optional[Callable[[T, Any], Any]] = None) -> 'PyLinq[U]':
+        """
+        Projects each element of a sequence to an iterable and flattens
+        the resulting sequences into one sequence.
+        An optional result_selector can transform pairs of (original_element, sub_element)
+        into the final elements of the sequence.
+
+        Args:
+            collection_selector: A transform function to apply to each element,
+                                    which returns a collection of sub-elements.
+            result_selector: An optional transform function to apply to each original
+                                element and each of its generated sub-elements.
+                                If provided, the output of this function becomes an
+                                element in the resulting sequence.
+
+        Returns:
+            A PyLinq sequence whose elements are the result of invoking the
+            one-to-many transform function on each element of the input sequence,
+            optionally transformed by the result_selector.
+        """
+        if result_selector is None:
+            return PyLinq(itertools.chain.from_iterable(collection_selector(item) for item in self._items))
+        else:
+            final_results = []
+            for item_t in self._items:
+                expanded_items_u = collection_selector(item_t)  # expanded_items_u is Iterable[U]
+                if expanded_items_u:
+                    for item_u in expanded_items_u:
+                        element_result = result_selector(item_t, item_u)
+                        final_results.append(element_result)
+            return PyLinq(final_results)
 
     def sequence_equal(self, other: Iterable[T]) -> bool:
         """Whether this sequence equals another sequence."""
@@ -402,6 +467,65 @@ class PyLinq(Generic[T]):
             return {key_selector(item): value_selector(item) for item in self._items}
         return {key_selector(item): item for item in self._items}  # type: ignore
 
+    @overload
+    def to_grouped_dictionary(
+        self,
+        group_key_selector: Callable[[T], GK],
+        inner_key_selector: Callable[[T], IK]
+    ) -> dict[GK, dict[IK, T]]: ...
+
+    @overload
+    def to_grouped_dictionary(
+        self,
+        group_key_selector: Callable[[T], GK],
+        inner_key_selector: Callable[[T], IK],
+        inner_value_selector: Callable[[T], IV]
+    ) -> dict[GK, dict[IK, IV]]: ...
+
+    def to_grouped_dictionary(
+        self,
+        group_key_selector: Callable[[T], GK],
+        inner_key_selector: Callable[[T], IK],
+        inner_value_selector: Optional[Callable[[T], IV]] = None
+    ) -> dict[GK, dict[IK, Any]]:
+        """
+        Groups elements by a key and then transforms each group into a dictionary.
+
+        This method first groups the elements of the PyLinq collection based on the
+        `group_key_selector`. Then, for each group, it creates a dictionary where
+        keys are derived using `inner_key_selector` and values are derived using
+        `inner_value_selector` from the items within that group. If
+        `inner_value_selector` is not provided, the item itself becomes the value.
+
+        Args:
+            group_key_selector: A function to extract the grouping key from an element.
+            inner_key_selector: A function to extract the key for the inner dictionary
+                                from an element within a group.
+            inner_value_selector: An optional function to extract the value for the
+                                  inner dictionary from an element within a group.
+                                  If None, the element itself is used as the value.
+
+        Returns:
+            A dictionary where keys are the group keys, and values are dictionaries
+            representing each group.
+        """
+        grouped_data = self.group_by(group_key_selector)
+        result_dictionary: dict[GK, dict[IK, Any]] = {}
+
+        for group_key, group_items_pylinq in grouped_data:
+            if inner_value_selector is not None:
+                inner_dict = group_items_pylinq.to_dict(
+                    key_selector=inner_key_selector,
+                    value_selector=inner_value_selector
+                )
+            else:
+                inner_dict = group_items_pylinq.to_dict(
+                    key_selector=inner_key_selector
+                )
+            result_dictionary[group_key] = inner_dict
+
+        return result_dictionary
+
     def to_list(self) -> list[T]:
         """Convert to a list of items"""
         return list(self._items)
@@ -419,7 +543,7 @@ class PyLinq(Generic[T]):
         return PyLinq(set(self._items).union(other))
 
     def where(self, predicate: Callable[[T], bool]) -> "PyLinq[T]":
-        return PyLinq([item for item in self._items if predicate(item)])
+        return self.filter(predicate)
 
     def zip(self, other: Iterable[U]) -> 'PyLinq[tuple[T, U]]':
         return PyLinq(zip(self._items, other))
